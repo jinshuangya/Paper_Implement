@@ -175,9 +175,14 @@ def eval_qstar(
     h.run()
     sol = h.getSolution()
     col = np.array(sol.col_value, dtype=float)
-    xval = col[[x[j].index for j in range(m)]]
+    # x and y are binary in K_s; snap the integral solution to remove the
+    # solver's floating-point dirt (e.g. 4.8e-17) so downstream coefficients
+    # stay clean for the LP/MIP builders.
+    xval = np.round(col[[x[j].index for j in range(m)]])
     y0val = col[[y0[j].index for j in range(m)]]
-    yval = col[[y[i * m + j].index for i in range(n) for j in range(m)]].reshape(n, m)
+    yval = np.round(
+        col[[y[i * m + j].index for i in range(n) for j in range(m)]]
+    ).reshape(n, m)
     theta = float(inst.q0 @ y0val - (inst.q * yval).sum())
     value = float(pi @ xval + pi0 * theta)
     return QStarResult(value=value, x=xval, theta=theta)

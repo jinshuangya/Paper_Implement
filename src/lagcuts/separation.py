@@ -44,8 +44,15 @@ class ScenarioPool:
     theta: list[float] = field(default_factory=list)
 
     def add(self, z: np.ndarray, theta_z: float) -> None:
-        self.z.append(np.asarray(z, dtype=float))
-        self.theta.append(float(theta_z))
+        # Zero out sub-threshold floating-point dirt: HiGHS rejects nonzero
+        # matrix coefficients below its small-value tolerance (~1e-9).
+        z = np.asarray(z, dtype=float).copy()
+        z[np.abs(z) < 1e-9] = 0.0
+        tz = float(theta_z)
+        if abs(tz) < 1e-9:
+            tz = 0.0
+        self.z.append(z)
+        self.theta.append(tz)
 
     def __len__(self) -> int:
         return len(self.z)
