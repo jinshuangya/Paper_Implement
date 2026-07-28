@@ -50,13 +50,22 @@ class SSLPInstance:
         return self.m
 
 
-def generate_sslp(m: int, n: int, S: int, k: int = 1) -> SSLPInstance:
+def generate_sslp(
+    m: int, n: int, S: int, k: int = 1, capacity_scale: float = 1.0
+) -> SSLPInstance:
     """Generate an SSLP instance following the paper's appendix recipe.
 
     ``k`` is the instance index; together with ``(m, n, S)`` it seeds the RNG so
     that instances are reproducible.  The paper does not publish its seeds, so
     these instances match the *distribution* and structure of the paper's test
     set rather than the exact numbers.
+
+    ``capacity_scale`` multiplies the server capacity ``u``.  With
+    ``capacity_scale = 1`` this is the standard SSLP.  Larger values turn the
+    capacity linking into a loose big-M constraint: in the LP relaxation a tiny
+    fractional ``x_j`` already supplies ample capacity, so the linking is slack
+    and its dual (hence the Benders cut direction) degenerates toward zero.  It
+    is the tunable knob for the "beyond Benders" (extension A) experiments.
     """
     # Deterministic, collision-resistant seed from the instance signature.
     seed = (m, n, S, k)
@@ -67,11 +76,12 @@ def generate_sslp(m: int, n: int, S: int, k: int = 1) -> SSLPInstance:
     d = rng.integers(0, 26, size=(n, m)).astype(float)
     q = d.copy()
     q0 = np.full(m, 1000.0)
-    u = float(d.sum() / m)
+    u = float(capacity_scale * d.sum() / m)
     p = np.full(S, 1.0 / S)
     h = rng.integers(0, 2, size=(S, n)).astype(float)  # Bernoulli(1/2)
 
+    tag = "sslp" if capacity_scale == 1.0 else f"sslpM{capacity_scale:g}"
     return SSLPInstance(
         m=m, n=n, S=S, c=c, q=q, d=d, q0=q0, u=u, p=p, h=h,
-        name=f"sslp{k}_{m}_{n}_{S}",
+        name=f"{tag}{k}_{m}_{n}_{S}",
     )
