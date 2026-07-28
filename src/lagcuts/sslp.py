@@ -43,6 +43,16 @@ class SSLPInstance:
     p: np.ndarray  # (S,)      scenario probabilities
     h: np.ndarray  # (S, n)    client availability (0/1) per scenario
 
+    # Decoupled ("loose-link + tight-capacity") formulation.  When
+    # ``link_bigM`` is None the standard coupled constraint
+    #     sum_i d_ij y_ij - y0_j <= u x_j
+    # is used.  When set, the linking and the capacity are split into
+    #     sum_i d_ij y_ij        <= link_bigM * x_j     (loose big-M linking)
+    #     sum_i d_ij y_ij - y0_j <= u                   (tight capacity, no x)
+    # which loosens the LP relaxation (collapsing the Benders direction) while
+    # keeping the integer problem hard (opening a site is all-or-nothing).
+    link_bigM: float | None = None
+
     name: str = "sslp"
 
     @property
@@ -51,7 +61,12 @@ class SSLPInstance:
 
 
 def generate_sslp(
-    m: int, n: int, S: int, k: int = 1, capacity_scale: float = 1.0
+    m: int,
+    n: int,
+    S: int,
+    k: int = 1,
+    capacity_scale: float = 1.0,
+    decoupled: bool = False,
 ) -> SSLPInstance:
     """Generate an SSLP instance following the paper's appendix recipe.
 
@@ -80,8 +95,18 @@ def generate_sslp(
     p = np.full(S, 1.0 / S)
     h = rng.integers(0, 2, size=(S, n)).astype(float)  # Bernoulli(1/2)
 
-    tag = "sslp" if capacity_scale == 1.0 else f"sslpM{capacity_scale:g}"
+    # Decoupled formulation: a big-M that never binds at an integer solution
+    # (x_j = 1 already permits serving every client at site j).
+    link_bigM = float(d.sum()) if decoupled else None
+
+    if decoupled:
+        tag = "sslpD"
+    elif capacity_scale != 1.0:
+        tag = f"sslpM{capacity_scale:g}"
+    else:
+        tag = "sslp"
     return SSLPInstance(
         m=m, n=n, S=S, c=c, q=q, d=d, q0=q0, u=u, p=p, h=h,
+        link_bigM=link_bigM,
         name=f"{tag}{k}_{m}_{n}_{S}",
     )

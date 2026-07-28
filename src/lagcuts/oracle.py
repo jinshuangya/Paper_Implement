@@ -16,8 +16,14 @@ Second-stage structure for scenario s (given the availability vector h^s):
     variables  y_ij in {0,1}   (or [0,1] for the LP relaxation / continuous),
                y0_j >= 0       (shortage)
     objective  q_s @ y  =  sum_j q0_j y0_j - sum_{i,j} q_ij y_ij
-    (A) capacity:   sum_i d_ij y_ij - y0_j <= u x_j          for each site j
     (B) assignment: sum_j y_ij = h^s_i                       for each client i
+
+Linking/capacity depends on the formulation (see SSLPInstance.link_bigM):
+    coupled   (A)  sum_i d_ij y_ij - y0_j <= u x_j
+    decoupled (L)  sum_i d_ij y_ij        <= link_bigM * x_j   (loose linking)
+              (C)  sum_i d_ij y_ij - y0_j <= u                 (tight capacity)
+Only the x-linking rows carry the first-stage coupling, so those are the rows
+whose duals define the Benders cut direction.
 """
 
 from __future__ import annotations
@@ -56,6 +62,58 @@ class QStarResult:
     theta: float  # q_s @ y* (second-stage cost at optimum; supergradient part)
 
 
+def _add_second_stage(h, inst, s, y, y0, x, x_is_var):
+    """Add the linking/capacity and assignment rows for scenario ``s``.
+
+    ``x`` is either an array of fixed values (``x_is_var=False``) or a sequence
+    of HiGHS variables (``x_is_var=True``).  Returns ``(link_rows, scale)`` where
+    ``link_rows[j]`` is the constraint whose dual gives the Benders direction for
+    x_j and ``scale`` is the coefficient of x_j on that row's right-hand side.
+    """
+    n, m = inst.n, inst.m
+    hs = inst.h[s]
+
+    def xrhs(coeff, j):
+        return coeff * x[j] if x_is_var else coeff * float(x[j])
+
+    link_rows = []
+    if inst.link_bigM is None:
+        scale = inst.u
+        for j in range(m):
+            link_rows.append(
+                h.addConstr(
+                    sum(inst.d[i, j] * y[i * m + j] for i in range(n)) - y0[j]
+                    <= xrhs(inst.u, j)
+                )
+            )
+    else:
+        scale = float(inst.link_bigM)
+        for j in range(m):
+            # (L) loose big-M linking -> Benders direction comes from here
+            link_rows.append(
+                h.addConstr(
+                    sum(inst.d[i, j] * y[i * m + j] for i in range(n))
+                    <= xrhs(scale, j)
+                )
+            )
+            # (C) tight capacity, independent of x
+            h.addConstr(
+                sum(inst.d[i, j] * y[i * m + j] for i in range(n)) - y0[j] <= inst.u
+            )
+
+    for i in range(n):
+        h.addConstr(sum(y[i * m + j] for j in range(m)) == float(hs[i]))
+
+    return link_rows, scale
+
+
+def _second_stage_cost(inst, y, y0):
+    n, m = inst.n, inst.m
+    return sum(inst.q0[j] * y0[j] for j in range(m)) - sum(
+        inst.q[i, j] * y[i * m + j] for i in range(n) for j in range(m)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Recourse value Q_s(x)  (x fixed, second stage is an integer program)
 # ---------------------------------------------------------------------------
@@ -64,30 +122,13 @@ def eval_recourse(inst: SSLPInstance, s: int, x: np.ndarray, relax: bool = False
     relaxed to [0, 1] (used only for diagnostics)."""
     h = _silent()
     n, m = inst.n, inst.m
-    hs = inst.h[s]
-
-    # y_ij flattened as i*m + j ; then y0_j.
     y = h.addVariables(n * m, lb=0.0, ub=1.0)
     y0 = h.addVariables(m, lb=0.0, ub=highspy.kHighsInf)
     if not relax:
         for v in y:
             h.setInteger(v)
-
-    # objective
-    obj = sum(inst.q0[j] * y0[j] for j in range(m))
-    obj -= sum(inst.q[i, j] * y[i * m + j] for i in range(n) for j in range(m))
-    h.minimize(obj)
-
-    # (A) capacity with x fixed
-    for j in range(m):
-        h.addConstr(
-            sum(inst.d[i, j] * y[i * m + j] for i in range(n)) - y0[j]
-            <= inst.u * float(x[j])
-        )
-    # (B) assignment
-    for i in range(n):
-        h.addConstr(sum(y[i * m + j] for j in range(m)) == float(hs[i]))
-
+    h.minimize(_second_stage_cost(inst, y, y0))
+    _add_second_stage(h, inst, s, y, y0, x, x_is_var=False)
     h.run()
     return float(h.getObjectiveValue())
 
@@ -100,38 +141,21 @@ def benders_cut(inst: SSLPInstance, s: int, x: np.ndarray) -> tuple[BendersCut, 
     ``Q_LP`` is the LP-relaxation recourse value at x (the cut is tight there)."""
     h = _silent()
     n, m = inst.n, inst.m
-    hs = inst.h[s]
-
     y = h.addVariables(n * m, lb=0.0, ub=1.0)
     y0 = h.addVariables(m, lb=0.0, ub=highspy.kHighsInf)
-
-    obj = sum(inst.q0[j] * y0[j] for j in range(m))
-    obj -= sum(inst.q[i, j] * y[i * m + j] for i in range(n) for j in range(m))
-    h.minimize(obj)
-
-    cap_rows = []
-    for j in range(m):
-        cap_rows.append(
-            h.addConstr(
-                sum(inst.d[i, j] * y[i * m + j] for i in range(n)) - y0[j]
-                <= inst.u * float(x[j])
-            )
-        )
-    asg_rows = []
-    for i in range(n):
-        asg_rows.append(h.addConstr(sum(y[i * m + j] for j in range(m)) == float(hs[i])))
+    h.minimize(_second_stage_cost(inst, y, y0))
+    link_rows, scale = _add_second_stage(h, inst, s, y, y0, x, x_is_var=False)
 
     h.run()
     q_lp = float(h.getObjectiveValue())
     row_dual = np.array(h.getSolution().row_dual, dtype=float)
 
-    # Capacity row j:  sum_i d_ij y_ij - y0_j <= u x_j
-    # Its dual mu_j gives sensitivity d(obj)/d(rhs) = d(obj)/d(u x_j).
-    # The Benders cut is  theta_s >= Q_LP(x_hat) + sum_j (u mu_j)(x_j - x_hat_j),
-    # i.e.  pi @ x + theta_s >= const   with  pi_j = -(u mu_j),
-    #       const = Q_LP(x_hat) - sum_j (u mu_j) x_hat_j.
-    mu_cap = row_dual[[cap_rows[j].index for j in range(m)]]
-    pi = -(inst.u * mu_cap)
+    # The x-linking row j has right-hand side (scale * x_j); its dual mu_j gives
+    # d(obj)/d(scale * x_j).  The Benders cut is
+    #   theta_s >= Q_LP(x_hat) + sum_j (scale mu_j)(x_j - x_hat_j),
+    # i.e.  pi @ x + theta_s >= const  with  pi_j = -(scale mu_j).
+    mu = row_dual[[link_rows[j].index for j in range(m)]]
+    pi = -(scale * mu)
     const = q_lp - float(pi @ x)
     return BendersCut(pi=pi, const=const), q_lp
 
@@ -146,7 +170,6 @@ def eval_qstar(
     together with the supergradient (x*, q_s@y*)."""
     h = _silent()
     n, m = inst.n, inst.m
-    hs = inst.h[s]
 
     x = h.addVariables(m, lb=0.0, ub=1.0)
     for v in x:
@@ -156,28 +179,17 @@ def eval_qstar(
         h.setInteger(v)
     y0 = h.addVariables(m, lb=0.0, ub=highspy.kHighsInf)
 
-    second_stage_cost = sum(inst.q0[j] * y0[j] for j in range(m)) - sum(
-        inst.q[i, j] * y[i * m + j] for i in range(n) for j in range(m)
+    obj = sum(float(pi[j]) * x[j] for j in range(m)) + float(pi0) * _second_stage_cost(
+        inst, y, y0
     )
-    obj = sum(float(pi[j]) * x[j] for j in range(m)) + float(pi0) * second_stage_cost
     h.minimize(obj)
-
-    # (A) capacity, x now a variable:  sum_i d_ij y_ij - y0_j <= u x_j
-    for j in range(m):
-        h.addConstr(
-            sum(inst.d[i, j] * y[i * m + j] for i in range(n)) - y0[j]
-            <= inst.u * x[j]
-        )
-    # (B) assignment
-    for i in range(n):
-        h.addConstr(sum(y[i * m + j] for j in range(m)) == float(hs[i]))
+    _add_second_stage(h, inst, s, y, y0, x, x_is_var=True)
 
     h.run()
     sol = h.getSolution()
     col = np.array(sol.col_value, dtype=float)
-    # x and y are binary in K_s; snap the integral solution to remove the
-    # solver's floating-point dirt (e.g. 4.8e-17) so downstream coefficients
-    # stay clean for the LP/MIP builders.
+    # x and y are binary in K_s; snap the integral solution to remove solver
+    # floating-point dirt so downstream coefficients stay clean.
     xval = np.round(col[[x[j].index for j in range(m)]])
     y0val = col[[y0[j].index for j in range(m)]]
     yval = np.round(

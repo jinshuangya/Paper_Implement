@@ -5,6 +5,7 @@ from __future__ import annotations
 import highspy
 import numpy as np
 
+from .oracle import _add_second_stage, _second_stage_cost
 from .sslp import SSLPInstance
 
 
@@ -22,22 +23,12 @@ def solve_extensive_form(inst: SSLPInstance) -> float:
 
     obj = sum(float(inst.c[j]) * x[j] for j in range(m))
     for s in range(S):
-        hs = inst.h[s]
         y = h.addVariables(n * m, lb=0.0, ub=1.0)
         for v in y:
             h.setInteger(v)
         y0 = h.addVariables(m, lb=0.0, ub=INF)
-        obj += float(inst.p[s]) * (
-            sum(float(inst.q0[j]) * y0[j] for j in range(m))
-            - sum(float(inst.q[i, j]) * y[i * m + j] for i in range(n) for j in range(m))
-        )
-        for j in range(m):
-            h.addConstr(
-                sum(float(inst.d[i, j]) * y[i * m + j] for i in range(n)) - y0[j]
-                <= inst.u * x[j]
-            )
-        for i in range(n):
-            h.addConstr(sum(y[i * m + j] for j in range(m)) == float(hs[i]))
+        obj += float(inst.p[s]) * _second_stage_cost(inst, y, y0)
+        _add_second_stage(h, inst, s, y, y0, x, x_is_var=True)
 
     h.minimize(obj)
     h.run()
