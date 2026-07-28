@@ -158,8 +158,13 @@ def _make_spec(
     if cfg.method == "rstr2":
         basis = _basis_last_k(benders_hist[s], cfg.K)
         return None if basis is None else PiSpec("rstr2", cfg.alpha, basis)
-    if cfg.method == "rstrmip":
-        candidates = benders_hist[s]
+    if cfg.method in ("rstrmip", "rstrmipV"):
+        candidates = list(benders_hist[s])
+        if cfg.method == "rstrmipV":
+            # Extension A (done right): enrich the candidate pool with the
+            # integer vertices x* from the oracle, then let rstrmip's
+            # violation-targeted MIP (eq. 28) select from the richer pool.
+            candidates = candidates + list(pools[s].z)
         if not candidates:
             return None
         basis = select_basis_mip(
