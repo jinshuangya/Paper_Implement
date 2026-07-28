@@ -51,6 +51,7 @@ class RunLog:
     oracle_calls: int = 0
     lp_bound: float | None = None  # bound after Benders phase converged
     final_bound: float | None = None
+    stop_reason: str = "unknown"  # "no_cut" (converged) | "time_limit" | "benders_only"
 
     def record(self, t0: float, lb: float, event: str) -> None:
         self.times.append(time.perf_counter() - t0)
@@ -84,6 +85,7 @@ def run_algorithm2(inst: SSLPInstance, cfg: Config) -> RunLog:
 
     for _ in range(cfg.max_outer):
         if time.perf_counter() - t0 > cfg.time_limit:
+            log.stop_reason = "time_limit"
             break
 
         xval, thval, lb = master.solve()
@@ -109,6 +111,7 @@ def run_algorithm2(inst: SSLPInstance, cfg: Config) -> RunLog:
                 print(f"[benders converged] LB = {lb:.4f}")
 
         if cfg.method == "benders":
+            log.stop_reason = "benders_only"
             break
 
         # ---- Lagrangian phase: restricted separation per scenario ----
@@ -131,6 +134,7 @@ def run_algorithm2(inst: SSLPInstance, cfg: Config) -> RunLog:
             last_lb = lb
             log.record(t0, lb, "lagrangian")
         else:
+            log.stop_reason = "no_cut"  # converged: no violated restricted cut
             break
 
     log.final_bound = last_lb if last_lb is not None else log.lp_bound
