@@ -46,6 +46,29 @@ Validated relationships (see `tests/`): `z_LP ≤ z_restricted ≤ z_LC(exact) �
 z_IP`, and `z_LC = z_D` (Theorem 3) — exact separation closes the whole
 Lagrangian-dual gap on small instances.
 
+### Reproduced result
+
+Root-node lower bound vs wall-clock time on an SSLP instance
+(`m=10, n=25, S=30`, `delta=0.5`, `K=20`):
+
+![bound vs time](docs/figures/bound_vs_time_sslp1_10_25_30.png)
+
+The restricted variants `rstr2`/`rstrmip` reach the Lagrangian-dual bound
+quickest, `rstr1` plateaus slightly lower (its basis is limited to the last `K`
+Benders coefficients), and **exact** separation is far slower — it has not
+converged at the time limit — reproducing the paper's central finding that
+restricted separation improves the bound much faster than exact separation. The
+Benders-only LP bound (dotted) sits far below, showing the integrality gap that
+Lagrangian cuts close. Numbers for this run:
+
+| method  | final LB | gap closed | oracle (MIP) calls |
+|---------|---------:|-----------:|-------------------:|
+| benders | −292.5   |       0 %  |          0 |
+| exact   | −153.9   |    97.2 %  |       2019 |
+| rstr1   | −159.4   |    93.2 %  |        454 |
+| rstr2   | −149.8   |     100 %  |        800 |
+| rstrmip | −149.8   |     100 %  |        800 |
+
 ## Layout
 
 ```

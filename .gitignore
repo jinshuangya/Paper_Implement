@@ -3,5 +3,5 @@ __pycache__/
 .pytest_cache/
 results/
 *.png
-!docs/*.png
+!docs/**/*.png
 .venv/
