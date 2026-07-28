@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .adaptive import adaptive_basis
 from .master import BendersMaster
 from .oracle import benders_cut
 from .separation import PiSpec, ScenarioPool, init_pool, separate
@@ -33,6 +34,7 @@ class Config:
     method: str = "rstrmip"
     K: int = 20
     alpha: float = 1.0
+    energy: float | None = None  # adaptiveA: spectrum-energy target for basis size
     delta: float = 0.5
     time_limit: float = 60.0
     benders_tol: float = 1e-4
@@ -160,4 +162,10 @@ def _make_spec(
             inst, s, np.array(candidates), pools[s], xval, thval[s], cfg.K, cfg.alpha
         )
         return None if basis is None else PiSpec("rstr2", cfg.alpha, basis)
+    if cfg.method == "adaptiveA":
+        # Extension A: adaptive SVD subspace over Benders coefficients AND the
+        # integer vertices x* pooled from the Q*_s oracle.
+        directions = list(benders_hist[s]) + list(pools[s].z)
+        ab = adaptive_basis(directions, cfg.K, energy=cfg.energy)
+        return None if ab is None else PiSpec("rstr2", cfg.alpha, ab.basis)
     raise ValueError(f"unknown method {cfg.method}")

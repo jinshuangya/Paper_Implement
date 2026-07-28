@@ -82,6 +82,22 @@ class PiSpec:
 # ---------------------------------------------------------------------------
 # Restricted separation master (eq. 17 with Qbar* in place of Q*)
 # ---------------------------------------------------------------------------
+_COEF_TOL = 1e-9  # HiGHS rejects nonzero matrix coefficients below ~this
+
+
+def _lin(coeffs, vars_):
+    """Build a HiGHS linear expression sum_i coeffs[i]*vars_[i], dropping any
+    coefficient with |.| < _COEF_TOL (HiGHS rejects them).  Returns ``None`` for
+    an empty expression."""
+    expr = None
+    for c, v in zip(coeffs, vars_):
+        c = float(c)
+        if abs(c) >= _COEF_TOL:
+            term = c * v
+            expr = term if expr is None else expr + term
+    return expr
+
+
 def _solve_restricted_master(
     pool: ScenarioPool,
     x_hat: np.ndarray,
@@ -91,7 +107,13 @@ def _solve_restricted_master(
 ) -> tuple[float, np.ndarray, float]:
     """Return (obj, pi, pi0) maximising  Qbar*(pi,pi0) - pi@x_hat - pi0*theta_hat
     over Pi_s.  Qbar* is modelled by an epigraph variable ``t`` with
-    ``t <= pi@z + pi0*theta_z`` for every pooled point."""
+    ``t <= pi@z + pi0*theta_z`` for every pooled point.
+
+    Restricted modes are built directly in the beta (coefficient) space with the
+    reduced coefficients computed in numpy and filtered, so an orthonormal SVD
+    basis (whose entries can be below the solver's coefficient tolerance) never
+    reaches HiGHS as a sub-threshold nonzero.
+    """
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
     h.setOptionValue("threads", 1)
@@ -101,52 +123,66 @@ def _solve_restricted_master(
     t = h.addVariable(lb=-INF, ub=INF)
 
     if spec.mode == "exact":
-        # pi free (m-dim), normalisation alpha*pi0 + ||pi||_1 <= 1
-        pi = h.addVariables(m, lb=-INF, ub=INF)
+        # decision vars are pi directly; pi = c-space, map to pi is identity.
+        cvars = h.addVariables(m, lb=-INF, ub=INF)
+        B = np.eye(m)  # pi = B^T @ c
         ap = h.addVariables(m, lb=0.0, ub=INF)  # |pi_j|
         for j in range(m):
-            h.addConstr(ap[j] >= pi[j])
-            h.addConstr(ap[j] >= -pi[j])
-        h.addConstr(spec.alpha * pi0 + sum(ap[j] for j in range(m)) <= 1.0)
-        pi_expr = [pi[j] for j in range(m)]
+            h.addConstr(ap[j] >= cvars[j])
+            h.addConstr(ap[j] >= -cvars[j])
+        norm_terms = _lin(np.full(m, 1.0), [ap[j] for j in range(m)])
+        h.addConstr(spec.alpha * pi0 + norm_terms <= 1.0)
     else:
         assert spec.basis is not None, "restricted modes need a basis"
-        K = spec.basis.shape[0]
-        beta = h.addVariables(K, lb=-INF, ub=INF)
-        # pi_j = sum_k beta_k * basis[k, j]
-        pi_expr = [sum(float(spec.basis[k, j]) * beta[k] for k in range(K)) for j in range(m)]
+        B = np.asarray(spec.basis, dtype=float)  # (K, m):  pi = B^T @ beta
+        K = B.shape[0]
+        cvars = h.addVariables(K, lb=-INF, ub=INF)  # beta
         if spec.mode == "rstr1":
-            ap = h.addVariables(m, lb=0.0, ub=INF)  # |pi_j|
+            ap = h.addVariables(m, lb=0.0, ub=INF)  # |pi_j|,  pi_j = B[:,j]·beta
             for j in range(m):
-                h.addConstr(ap[j] >= pi_expr[j])
-                h.addConstr(ap[j] >= -pi_expr[j])
-            h.addConstr(spec.alpha * pi0 + sum(ap[j] for j in range(m)) <= 1.0)
+                pij = _lin(B[:, j], [cvars[k] for k in range(K)])
+                if pij is not None:
+                    h.addConstr(ap[j] >= pij)
+                    h.addConstr(ap[j] >= -pij)
+            norm_terms = _lin(np.full(m, 1.0), [ap[j] for j in range(m)])
+            h.addConstr(spec.alpha * pi0 + norm_terms <= 1.0)
         elif spec.mode == "rstr2":
             ab = h.addVariables(K, lb=0.0, ub=INF)  # |beta_k|
             for k in range(K):
-                h.addConstr(ab[k] >= beta[k])
-                h.addConstr(ab[k] >= -beta[k])
-            h.addConstr(spec.alpha * pi0 + sum(ab[k] for k in range(K)) <= 1.0)
+                h.addConstr(ab[k] >= cvars[k])
+                h.addConstr(ab[k] >= -cvars[k])
+            norm_terms = _lin(np.full(K, 1.0), [ab[k] for k in range(K)])
+            h.addConstr(spec.alpha * pi0 + norm_terms <= 1.0)
         else:
             raise ValueError(f"unknown mode {spec.mode}")
 
-    # epigraph of Qbar*: t <= pi@z + pi0*theta_z for each pooled point
-    for z, tz in zip(pool.z, pool.theta):
-        h.addConstr(t <= sum(float(z[j]) * pi_expr[j] for j in range(m)) + float(tz) * pi0)
+    nc = B.shape[0]
+    clist = [cvars[k] for k in range(nc)]
 
-    # maximise t - pi@x_hat - pi0*theta_hat
-    h.maximize(t - sum(float(x_hat[j]) * pi_expr[j] for j in range(m)) - float(theta_hat) * pi0)
+    # epigraph of Qbar*: t <= pi@z + tz*pi0 = (B@z)·c + tz*pi0
+    for z, tz in zip(pool.z, pool.theta):
+        rhs = _lin(B @ z, clist)
+        if abs(tz) >= _COEF_TOL:
+            term = float(tz) * pi0
+            rhs = term if rhs is None else rhs + term
+        h.addConstr(t <= (0.0 if rhs is None else rhs))
+
+    # objective: t - pi@x_hat - theta_hat*pi0 = t - (B@x_hat)·c - theta_hat*pi0
+    obj = t
+    obj_c = _lin(-(B @ x_hat), clist)
+    if obj_c is not None:
+        obj = obj + obj_c
+    if abs(theta_hat) >= _COEF_TOL:
+        obj = obj - float(theta_hat) * pi0
+    h.maximize(obj)
 
     h.run()
-    obj = float(h.getObjectiveValue())
+    obj_val = float(h.getObjectiveValue())
     col = np.array(h.getSolution().col_value, dtype=float)
-    if spec.mode == "exact":
-        pi_val = col[[pi[j].index for j in range(m)]]
-    else:
-        beta_val = col[[beta[k].index for k in range(spec.basis.shape[0])]]
-        pi_val = spec.basis.T @ beta_val
+    c_val = col[[cvars[k].index for k in range(nc)]]
+    pi_val = B.T @ c_val
     pi0_val = float(col[pi0.index])
-    return obj, pi_val, pi0_val
+    return obj_val, pi_val, pi0_val
 
 
 # ---------------------------------------------------------------------------

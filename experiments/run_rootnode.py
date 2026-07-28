@@ -25,13 +25,14 @@ from lagcuts.algo2 import Config, run_algorithm2
 from lagcuts.reference import solve_extensive_form
 from lagcuts.sslp import generate_sslp
 
-METHODS = ["benders", "exact", "rstr1", "rstr2", "rstrmip"]
+METHODS = ["benders", "exact", "rstr1", "rstr2", "rstrmip", "adaptiveA"]
 COLORS = {
     "benders": "#888888",
     "exact": "#d62728",
     "rstr1": "#1f77b4",
     "rstr2": "#2ca02c",
     "rstrmip": "#9467bd",
+    "adaptiveA": "#ff7f0e",
 }
 
 
