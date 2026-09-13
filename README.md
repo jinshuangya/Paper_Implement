@@ -110,3 +110,7 @@ techniques* (verified on SIP, but stated on a broader axis):
 
 These are scaffolding targets; the code above is the faithful baseline they
 build on.
+
+For how these axes rank against the wider set of candidate topics under a
+**no-GPU / no-LLM-budget / agent-executed** setting — and which single
+direction to start with — see [`docs/TOPIC_TRIAGE.md`](docs/TOPIC_TRIAGE.md).
